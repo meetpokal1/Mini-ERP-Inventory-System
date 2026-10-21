@@ -1,78 +1,92 @@
 # Mini Inventory / ERP Management System
 
-A simplified, working ERP module for inventory management — built to
-understand the core data flows (products, suppliers, purchase orders, stock
-movement) that real ERP platforms are built around.
+A small Streamlit inventory prototype built around three practical operations problems: maintaining stock records, avoiding redundant replenishment when stock is already on order, and reconciling physical counts with the system ledger.
 
-## Problem Statement
+> **Scope:** This is a portfolio and learning project, not a replacement for a production ERP. It uses synthetic/demo records and does not forecast demand, model supplier lead times, or support multi-warehouse allocation.
 
-Small businesses often track inventory in spreadsheets, which don't scale:
-no automatic low-stock alerts, no audit trail of stock changes, and manual
-purchase-order follow-up. This project implements the core of what an
-ERP inventory module actually does, end to end:
+## Problems addressed
 
-- Maintain a product catalog with SKU, price, stock level, and reorder threshold
-- Track suppliers and link them to products
-- Record every stock movement (IN/OUT) with a timestamped audit trail
-- Auto-flag products that have fallen below their reorder level
-- Create purchase orders, and automatically update stock when a PO is marked "Received"
+- Stock levels and supplier relationships can become difficult to track in spreadsheets.
+- Simple low-stock alerts can be noisy: an item may appear below its threshold even though a pending purchase order is already on the way.
+- Physical stocktakes often need a manual comparison between a counted quantity and the quantity recorded in the system.
+- Stock corrections and purchase receipts need a clear movement log, and an accidental double-click should not add the same purchase order twice.
 
-## Tech Stack
+## Current features
 
-- **Python 3** + built-in **sqlite3** — no external DB server needed
-- **Streamlit** — interactive dashboard UI
-- **pandas** — for displaying/formatting tables in the UI
+- Maintain products, suppliers, purchase orders, and stock IN/OUT movements in SQLite.
+- Display stock value, pending purchase orders, and stock below configured thresholds.
+- **Replenishment planning:** includes quantities on pending purchase orders before calculating whether there is still a shortfall to the configured threshold. This helps avoid duplicate reorder suggestions for already-covered items.
+- **Physical count reconciliation:** download a CSV template, upload a physical-count CSV or Excel file with `sku,counted_qty`, and compare counted quantities with system stock.
+- Calculate quantity variances and a signed variance value at unit price to prioritise manual investigation.
+- Highlight unknown SKUs and reject duplicate SKUs, blank SKUs, negative counts, non-integer counts, and invalid quantities.
+- Post an approved physical count as a stock adjustment only after an explicit confirmation. Every adjustment is recorded as a stock movement with a note.
+- Prevent stock-out transactions from taking on-hand stock below zero.
+- Mark a purchase order as received only once, updating stock and the movement log atomically.
+- Include automated tests for the count-review rules, replenishment logic, and key stock-control safeguards.
 
-## Project Structure
+## Tech stack
 
-```
-mini-erp-inventory/
-├── app.py             # Streamlit dashboard (5 tabs: Dashboard, Products, Stock, POs, Suppliers)
-├── database.py         # SQLite schema + all data access functions
-├── seed_data.py         # Populates sample suppliers/products/POs for a demo
-├── requirements.txt
-└── README.md
-```
+- Python
+- Streamlit
+- pandas
+- SQLite
+- pytest
 
-## Data Model
+## Run locally
 
-- **suppliers** → id, name, contact info
-- **products** → SKU, name, category, price, quantity_in_stock, reorder_level, linked supplier
-- **purchase_orders** → product, supplier, quantity ordered, status (Pending/Received)
-- **stock_movements** → full audit log of every stock IN/OUT with timestamp and note
+Create and activate a virtual environment, then install dependencies:
 
-## How to Run
+    python -m venv .venv
 
-```bash
-pip install -r requirements.txt
-python seed_data.py        # creates and populates inventory.db with sample data
-streamlit run app.py
-```
+    # Windows PowerShell
+    .\.venv\Scripts\Activate.ps1
 
-The dashboard opens with:
-- **Dashboard** — key metrics + low-stock alerts at a glance
-- **Products** — view/add products
-- **Stock Movement** — record stock in/out (e.g. sale, damage, new stock received)
-- **Purchase Orders** — raise a PO to a supplier, and mark it received (auto-updates stock)
-- **Suppliers** — manage supplier records
+    # macOS / Linux
+    source .venv/bin/activate
 
-## Sample Data
+    python -m pip install -r requirements.txt
+    python seed_data.py
+    streamlit run app.py
 
-`seed_data.py` creates 3 suppliers, 6 products (including a few already below
-their reorder level to demonstrate the low-stock alerts), and 2 open purchase
-orders.
+The seed script recreates the local demo database with three suppliers, six products, and two pending purchase orders.
 
-## What I'd Improve Next
+## Physical count file format
 
-- Add user authentication/roles (admin vs. staff)
-- Add reporting: stock valuation over time, fast/slow-moving items
-- Migrate from SQLite to PostgreSQL for a more production-realistic setup
-- Deploy on Streamlit Community Cloud for a live demo link
+The input file must contain these columns:
 
-## Why I Built This
+    sku,counted_qty
+    SKU-001,44
+    SKU-002,8
 
-This scoped-down inventory module represents the core logic behind ERP
-systems — the area I'm aiming to specialize in. Building it from scratch
-(schema design, business rules like auto-updating stock on PO receipt, and a
-usable UI) gave me hands-on understanding of what ERP software actually
-automates.
+The app compares each count with current system stock. Unknown SKUs appear as review exceptions and block applying the batch until the uploaded file is corrected. Before posting any adjustment, inspect the count and variance: a variance is a signal to investigate, not evidence of loss or wrongdoing. Confirm whether receipts, sales, returns, damage, unit conversions, or data-entry mistakes explain the difference.
+
+A template based on the current product catalogue is available from the Physical Count tab.
+
+## Replenishment planning rules
+
+For each product:
+
+- Projected quantity = on-hand quantity + quantities on pending purchase orders.
+- Additional quantity to reach threshold = the non-negative gap between the projected quantity and the configured reorder threshold.
+- A pending purchase order that already covers the threshold is surfaced as coverage rather than another suggested reorder.
+
+This is a basic threshold-based planning aid, not demand forecasting. It does not include average daily sales, lead time, seasonality, safety-stock policy, supplier constraints, or purchase pack sizes.
+
+## Tests
+
+Run:
+
+    python -m pytest -q
+
+GitHub Actions runs the same test suite on pushes and pull requests.
+
+## Why I built it
+
+I wanted to model the practical controls behind an inventory workflow, not just create an add/edit/delete dashboard. The cycle-count feature connects physical observations with system quantities, while the replenishment workbench demonstrates how operational context—especially stock already on order—changes a simple alert into a more useful review queue.
+
+## Limitations and responsible use
+
+- Use synthetic data for demos; do not publish private supplier or business records.
+- Review stock variances before posting adjustments.
+- The project does not include authentication, role permissions, concurrency testing across multiple users, backups, or production deployment hardening.
+- The configured reorder threshold is an input to the demo, not a guaranteed service-level or demand recommendation.

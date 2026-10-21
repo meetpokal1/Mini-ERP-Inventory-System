@@ -131,25 +131,49 @@ def get_low_stock_products():
 
 
 def adjust_stock(product_id, change_qty, movement_type, note=""):
-    """movement_type: 'IN' (received stock) or 'OUT' (sold/used stock)."""
+    """Record one validated stock movement without allowing negative on-hand stock."""
+    movement_type = str(movement_type).strip().upper()
+    if movement_type not in {"IN", "OUT"}:
+        raise ValueError("Movement type must be 'IN' or 'OUT'.")
+    try:
+        quantity = int(change_qty)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Movement quantity must be a positive whole number.") from exc
+    if quantity <= 0 or str(change_qty).strip() != str(quantity):
+        raise ValueError("Movement quantity must be a positive whole number.")
+
     conn = get_connection()
-    cur = conn.cursor()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.cursor()
+        product = cur.execute(
+            "SELECT quantity_in_stock FROM products WHERE product_id = ?",
+            (product_id,),
+        ).fetchone()
+        if product is None:
+            raise ValueError("Product not found.")
+        current_qty = int(product["quantity_in_stock"])
+        if movement_type == "OUT" and quantity > current_qty:
+            raise ValueError(
+                f"Stock-out quantity ({quantity}) exceeds available stock ({current_qty})."
+            )
 
-    signed_qty = change_qty if movement_type == "IN" else -change_qty
-
-    cur.execute(
-        "UPDATE products SET quantity_in_stock = quantity_in_stock + ? WHERE product_id = ?",
-        (signed_qty, product_id),
-    )
-    cur.execute(
-        """INSERT INTO stock_movements (product_id, change_qty, movement_type, note, timestamp)
-           VALUES (?, ?, ?, ?, ?)""",
-        (product_id, change_qty, movement_type, note, datetime.now().isoformat(timespec="seconds")),
-    )
-    conn.commit()
-    conn.close()
-
-
+        signed_qty = quantity if movement_type == "IN" else -quantity
+        cur.execute(
+            "UPDATE products SET quantity_in_stock = quantity_in_stock + ? WHERE product_id = ?",
+            (signed_qty, product_id),
+        )
+        cur.execute(
+            """INSERT INTO stock_movements (product_id, change_qty, movement_type, note, timestamp)
+               VALUES (?, ?, ?, ?, ?)""",
+            (product_id, quantity, movement_type, note, datetime.now().isoformat(timespec="seconds")),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 def get_stock_movements(product_id=None):
     conn = get_connection()
     if product_id:
@@ -188,17 +212,94 @@ def get_purchase_orders():
     return [dict(r) for r in rows]
 
 
-def mark_po_received(po_id):
-    """Marks a PO as received AND automatically adds the stock in."""
+def set_stock_to_counted_quantity(product_id, counted_qty, note="Physical stock count reconciliation"):
+    """Set on-hand stock to a verified physical count and record the variance atomically.
+
+    Returns the signed stock change (counted quantity minus prior system quantity).
+    """
+    try:
+        target_qty = int(counted_qty)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Counted quantity must be a non-negative whole number.") from exc
+    if target_qty < 0 or str(counted_qty).strip() != str(target_qty):
+        raise ValueError("Counted quantity must be a non-negative whole number.")
+
     conn = get_connection()
-    cur = conn.cursor()
-    po = cur.execute("SELECT * FROM purchase_orders WHERE po_id = ?", (po_id,)).fetchone()
-    if po is None:
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.cursor()
+        product = cur.execute(
+            "SELECT quantity_in_stock FROM products WHERE product_id = ?",
+            (product_id,),
+        ).fetchone()
+        if product is None:
+            raise ValueError("Product not found.")
+
+        current_qty = int(product["quantity_in_stock"])
+        delta = target_qty - current_qty
+        if delta:
+            movement_type = "IN" if delta > 0 else "OUT"
+            audit_note = (
+                f"{note}; system_qty={current_qty}; counted_qty={target_qty}; "
+                f"variance={delta:+d}"
+            )
+            cur.execute(
+                "UPDATE products SET quantity_in_stock = ? WHERE product_id = ?",
+                (target_qty, product_id),
+            )
+            cur.execute(
+                """INSERT INTO stock_movements (product_id, change_qty, movement_type, note, timestamp)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (product_id, abs(delta), movement_type, audit_note, datetime.now().isoformat(timespec="seconds")),
+            )
+        conn.commit()
+        return delta
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
         conn.close()
-        raise ValueError("Purchase order not found")
 
-    cur.execute("UPDATE purchase_orders SET status = 'Received' WHERE po_id = ?", (po_id,))
-    conn.commit()
-    conn.close()
 
-    adjust_stock(po["product_id"], po["quantity_ordered"], "IN", note=f"Received against PO #{po_id}")
+def mark_po_received(po_id):
+    """Receive a pending PO exactly once, atomically updating stock and the audit log."""
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.cursor()
+        po = cur.execute(
+            "SELECT * FROM purchase_orders WHERE po_id = ?",
+            (po_id,),
+        ).fetchone()
+        if po is None:
+            raise ValueError("Purchase order not found.")
+        if str(po["status"]).strip().casefold() != "pending":
+            raise ValueError(f"Purchase order #{po_id} is already received or not pending.")
+
+        updated = cur.execute(
+            "UPDATE purchase_orders SET status = 'Received' WHERE po_id = ? AND status = 'Pending'",
+            (po_id,),
+        )
+        if updated.rowcount != 1:
+            raise ValueError(f"Purchase order #{po_id} is already received or not pending.")
+
+        cur.execute(
+            "UPDATE products SET quantity_in_stock = quantity_in_stock + ? WHERE product_id = ?",
+            (int(po["quantity_ordered"]), int(po["product_id"])),
+        )
+        cur.execute(
+            """INSERT INTO stock_movements (product_id, change_qty, movement_type, note, timestamp)
+               VALUES (?, ?, 'IN', ?, ?)""",
+            (
+                int(po["product_id"]),
+                int(po["quantity_ordered"]),
+                f"Received against PO #{po_id}",
+                datetime.now().isoformat(timespec="seconds"),
+            ),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
