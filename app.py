@@ -12,8 +12,9 @@ import pandas as pd
 from database import (
     DB_PATH, init_db, add_supplier, add_product, get_suppliers, get_products,
     get_low_stock_products, adjust_stock, create_purchase_order,
-    get_purchase_orders, mark_po_received,
+    get_purchase_orders, mark_po_received, set_stock_to_counted_quantity,
 )
+from inventory_controls import build_cycle_count_review, build_replenishment_plan
 
 if not os.path.exists(DB_PATH):
     init_db()
@@ -21,8 +22,8 @@ if not os.path.exists(DB_PATH):
 st.set_page_config(page_title="Mini Inventory / ERP System", layout="wide")
 st.title("📦 Mini Inventory / ERP Management System")
 
-tab_dashboard, tab_products, tab_stock, tab_po, tab_suppliers = st.tabs(
-    ["Dashboard", "Products", "Stock Movement", "Purchase Orders", "Suppliers"]
+tab_dashboard, tab_products, tab_stock, tab_po, tab_suppliers, tab_replenishment, tab_cycle_count = st.tabs(
+    ["Dashboard", "Products", "Stock Movement", "Purchase Orders", "Suppliers", "Replenishment Plan", "Physical Count"]
 )
 
 # ---------------- DASHBOARD ----------------
@@ -168,3 +169,133 @@ with tab_suppliers:
                 add_supplier(name, contact, phone, email)
                 st.success(f"Added supplier: {name}")
                 st.rerun()
+
+
+# ---------------- REPLENISHMENT PLANNING ----------------
+with tab_replenishment:
+    st.subheader("Replenishment Planning")
+    st.caption(
+        "The plan adds quantities on pending purchase orders to on-hand stock before "
+        "showing a remaining shortfall to the configured reorder threshold. It is a "
+        "threshold check, not a demand forecast."
+    )
+    plan = build_replenishment_plan(get_products(), get_purchase_orders())
+    if plan.empty:
+        st.info("Add products to build a replenishment plan.")
+    else:
+        st.dataframe(plan, use_container_width=True, hide_index=True)
+        covered = int((plan["planning_status"] == "Covered by pending PO").sum())
+        shortfalls = int((plan["additional_qty_to_reach_threshold"] > 0).sum())
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Products assessed", len(plan))
+        col2.metric("Below threshold after inbound POs", shortfalls)
+        col3.metric("Low-stock products covered by pending PO", covered)
+        st.info(
+            "Before creating a new purchase order, verify the supplier, delivery date, "
+            "and whether the pending order is still expected. The tool does not know "
+            "supplier lead times or future demand."
+        )
+
+
+# ---------------- PHYSICAL STOCK COUNT RECONCILIATION ----------------
+with tab_cycle_count:
+    st.subheader("Physical Stock Count Reconciliation")
+    st.write(
+        "Compare a shelf count with system stock, investigate variances, and only then "
+        "post approved adjustments. A variance is a review signal, not proof of loss."
+    )
+    st.caption(
+        "Upload only authorised data. The demo stores no uploaded file permanently, "
+        "but the app is not a production security or multi-user system."
+    )
+
+    count_products = get_products()
+    if not count_products:
+        st.info("Add products before preparing a physical count.")
+    else:
+        template = pd.DataFrame(
+            {
+                "sku": [product["sku"] for product in count_products],
+                "counted_qty": [product["quantity_in_stock"] for product in count_products],
+            }
+        )
+        st.download_button(
+            "Download physical-count CSV template",
+            data=template.to_csv(index=False).encode("utf-8"),
+            file_name="physical_stock_count_template.csv",
+            mime="text/csv",
+        )
+        count_file = st.file_uploader(
+            "Upload completed count file (CSV or Excel)",
+            type=["csv", "xlsx"],
+            key="physical_count_upload",
+            help="Required columns: sku, counted_qty. Each SKU must appear only once.",
+        )
+
+        if count_file is not None:
+            try:
+                if count_file.name.lower().endswith(".csv"):
+                    count_data = pd.read_csv(count_file)
+                else:
+                    count_data = pd.read_excel(count_file)
+
+                review = build_cycle_count_review(count_products, count_data)
+                variances = review.loc[review["status"] == "VARIANCE"]
+                unknown_skus = review.loc[review["status"] == "UNKNOWN_SKU"]
+
+                count_col1, count_col2, count_col3 = st.columns(3)
+                count_col1.metric("SKUs counted", len(review))
+                count_col2.metric("Quantity variances", len(variances))
+                count_col3.metric("Unknown SKUs", len(unknown_skus))
+
+                st.subheader("Count Review")
+                st.dataframe(review, use_container_width=True, hide_index=True)
+
+                if not unknown_skus.empty:
+                    st.error(
+                        "Resolve unknown SKU(s) in the upload before posting any count "
+                        "adjustments. Correct the file and upload it again."
+                    )
+
+                if variances.empty:
+                    st.success("No quantity variances need adjustment under this count.")
+                else:
+                    st.warning(
+                        "Investigate unrecorded receipts, sales, returns, damage, unit "
+                        "conversions, or entry errors. Apply the count only after the "
+                        "physical quantity has been verified."
+                    )
+                    confirmed = st.checkbox(
+                        "I have verified the physical count and reviewed each variance.",
+                        key="confirm_physical_count_adjustments",
+                    )
+                    if st.button(
+                        "Apply verified stock-count adjustments",
+                        disabled=(not confirmed or not unknown_skus.empty),
+                    ):
+                        try:
+                            product_by_sku = {
+                                str(product["sku"]).strip().casefold(): product
+                                for product in get_products()
+                            }
+                            applied = 0
+                            for _, row in variances.iterrows():
+                                product = product_by_sku[str(row["sku"]).strip().casefold()]
+                                set_stock_to_counted_quantity(
+                                    int(product["product_id"]),
+                                    int(row["counted_qty"]),
+                                    note=(
+                                        f"Cycle count upload {count_file.name}; "
+                                        f"reviewed variance {int(row['variance_qty']):+d}"
+                                    ),
+                                )
+                                applied += 1
+                            st.success(
+                                f"Applied {applied} verified count adjustment(s). "
+                                "Each change was written to the stock movement log."
+                            )
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Could not apply the stock count: {exc}")
+            except Exception as exc:
+                st.error(f"Could not review this count file: {exc}")
