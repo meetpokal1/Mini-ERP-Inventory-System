@@ -99,9 +99,12 @@ with tab_stock:
             submitted = st.form_submit_button("Record Movement")
 
             if submitted:
-                adjust_stock(product_options[product_label], int(qty), movement_type, note)
-                st.success(f"Recorded {movement_type} of {qty} unit(s) for {product_label}")
-                st.rerun()
+                try:
+                    adjust_stock(product_options[product_label], int(qty), movement_type, note)
+                    st.success(f"Recorded {movement_type} of {qty} unit(s) for {product_label}")
+                    st.rerun()
+                except (ValueError, Exception) as exc:
+                    st.error(f"Stock movement was not recorded: {exc}")
     else:
         st.info("Add a product first before recording stock movements.")
 
