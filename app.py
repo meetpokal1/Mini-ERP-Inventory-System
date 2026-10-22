@@ -19,8 +19,12 @@ from inventory_controls import build_cycle_count_review, build_replenishment_pla
 if not os.path.exists(DB_PATH):
     init_db()
 
+DEMO_MODE = os.environ.get("DEMO_MODE", "").lower() in ("1", "true")
+
 st.set_page_config(page_title="Mini Inventory / ERP System", layout="wide")
 st.title("📦 Mini Inventory / ERP Management System")
+if DEMO_MODE:
+    st.info("🔒 **Read-Only Demonstration Mode:** Database modifications are disabled to preserve seeded sample integrity.")
 
 tab_dashboard, tab_products, tab_stock, tab_po, tab_suppliers, tab_replenishment, tab_cycle_count = st.tabs(
     ["Dashboard", "Products", "Stock Movement", "Purchase Orders", "Suppliers", "Replenishment Plan", "Physical Count"]
@@ -76,9 +80,12 @@ with tab_products:
             if not sku or not name:
                 st.error("SKU and Product Name are required.")
             else:
-                supplier_id = supplier_options.get(supplier_name) if supplier_name != "(none)" else None
-                try:
-                    add_product(sku, name, category, unit_price, int(qty), int(reorder), supplier_id)
+                if DEMO_MODE:
+                    st.warning("Read-only demo: product creation disabled.")
+                else:
+                    supplier_id = supplier_options.get(supplier_name) if supplier_name != "(none)" else None
+                    try:
+                        add_product(sku, name, category, unit_price, int(qty), int(reorder), supplier_id)
                     st.success(f"Added product {sku} - {name}")
                     st.rerun()
                 except Exception as e:
