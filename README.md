@@ -2,6 +2,13 @@
 
 A small Streamlit inventory prototype built around three practical operations problems: maintaining stock records, avoiding redundant replenishment when stock is already on order, and reconciling physical counts with the system ledger.
 
+## Interface Preview (Illustrative)
+
+![Mini ERP inventory dashboard UI preview using seeded demo data](screenshots/inventory-dashboard.svg)
+
+> Illustrative interface preview based on the seeded sample catalogue and replenishment logic. This is not a screenshot captured from a running instance.
+
+
 > **Scope:** This is a portfolio and learning project, not a replacement for a production ERP. It uses synthetic/demo records and does not forecast demand, model supplier lead times, or support multi-warehouse allocation.
 
 ## Problems addressed
